@@ -5,7 +5,9 @@ Command-line entry for the space tool.
 from __future__ import annotations
 
 import argparse
+import sys
 
+from .cleaners import ArchCleaner
 from .scanner import DiskScanner
 from .ui import SpaceUI
 
@@ -14,23 +16,22 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="space",
         description=(
-            "Show disk space for all volumes, or the size of a file/directory "
-            "plus its volume."
+            "Mode A (no path): disk overview for all volumes, then Arch maintenance tips. "
+            "Mode B (path): Bloat Hunter — total size and Top 5 largest immediate children."
         ),
     )
     p.add_argument(
         "path",
         nargs="?",
         default=None,
-        help="File or directory to measure (optional).",
+        help="Directory or file to analyze with Bloat Hunter (optional).",
     )
     p.add_argument(
         "-x",
         "--one-filesystem",
         action="store_true",
         help=(
-            "When sizing a directory, stay on the same device (like du -x). "
-            "Use for '/' to skip other mounts and finish much faster."
+            "Bloat Hunter only: stay on the same device as the path (like du -x)."
         ),
     )
     return p
@@ -40,7 +41,22 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     scanner = DiskScanner()
     ui = SpaceUI(scanner)
+    cleaner = ArchCleaner(scanner)
+
     if args.path is None:
-        ui.print_partitions_overview()
-    else:
-        ui.print_path_report(args.path, one_filesystem=args.one_filesystem)
+        # Mode A — global partitions, then ArchCleaner tips at the bottom.
+        ui.print_partition_table()
+        ui.print_arch_maintenance_tips(cleaner.recommendation())
+        return
+
+    # Mode B — Bloat Hunter on the given path (no partition table).
+    code = ui.print_bloat_hunter(
+        args.path,
+        one_filesystem=args.one_filesystem,
+    )
+    if code != 0:
+        sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()

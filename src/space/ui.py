@@ -4,14 +4,14 @@ Rich terminal rendering for disk and path reports.
 
 from __future__ import annotations
 
+import errno
 import os
-import sys
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import config
-from .scanner import CleanupHint, DiskScanner
+from .scanner import DiskScanner, TopItem
 
 
 class SpaceUI:
@@ -103,7 +103,24 @@ class SpaceUI:
         out.append(f" {pct:.1f}%", style="default")
         return out
 
-    def print_partitions_overview(self) -> None:
+    def print_access_error(self, path: str, exc: BaseException) -> None:
+        """Human-readable message for permission and I/O failures."""
+        if isinstance(exc, PermissionError) or (
+            isinstance(exc, OSError) and exc.errno == errno.EACCES
+        ):
+            self.console.print(
+                f"[red]Permission denied[/red] — cannot read "
+                f"[cyan]{path}[/cyan]. Try a different path or elevated permissions."
+            )
+            return
+        if isinstance(exc, OSError) and exc.errno == errno.ENOENT:
+            self.console.print(f"[red]Not found[/red] — [cyan]{path}[/cyan]")
+            return
+        name = type(exc).__name__
+        self.console.print(f"[red]{name}[/red] — {exc}")
+
+    def print_partition_table(self) -> None:
+        """Mode A — global disk overview (no Arch tips)."""
         tw = self.terminal_table_width()
         table = Table(
             title="Disk space (all volumes)",
@@ -152,133 +169,134 @@ class SpaceUI:
             )
 
         self.console.print(table)
-        hints = self._scanner.arch_cleanup_hints()
-        if hints:
-            self.print_arch_cleanup(hints, config.CACHE_WARN_BYTES)
 
-    def print_arch_cleanup(
-        self, hints: list[CleanupHint], warn_bytes: int
-    ) -> None:
+    def print_arch_maintenance_tips(self, message: str | None) -> None:
+        """Mode A — ArchCleaner text after the partition table."""
+        if not message:
+            return
+        self.console.print()
+        self.console.print(
+            Panel(
+                message,
+                title="[bold]Maintenance tips[/bold] (Arch)",
+                border_style="dim",
+            )
+        )
+
+    def print_bloat_hunter_top_items(self, items: list[TopItem]) -> None:
+        """Render Top N immediate children (name, type, size, relative bar)."""
         tw = self.terminal_table_width()
-        t = Table(
-            title="Smart cleanup (Arch)",
-            caption=(
-                f"Caches at or above {self.human_bytes(warn_bytes)} trigger a hint."
-            ),
+        if not items:
+            self.console.print(
+                "[dim]No files or folders to rank here (empty or all skipped).[/dim]"
+            )
+            return
+
+        largest = items[0].size
+        top_table = Table(
+            title="Bloat Hunter — largest items here",
             header_style="bold magenta",
             width=tw,
             expand=True,
+            caption="Bars show share of the largest entry in this list.",
         )
-        t.add_column(
-            "Location",
+        top_table.add_column(
+            "Name",
             style="cyan",
             overflow="ellipsis",
+            no_wrap=True,
             max_width=max(16, tw // 5),
         )
-        t.add_column("Size", justify="right", max_width=12)
-        t.add_column(
-            "Suggestion",
+        top_table.add_column("Type", max_width=10)
+        top_table.add_column("Size", justify="right", max_width=12)
+        top_table.add_column(
+            "Share of largest",
+            justify="left",
             overflow="ellipsis",
-            max_width=max(24, tw // 2),
+            max_width=max(26, tw // 2),
         )
-        for h in hints:
-            t.add_row(h.label, self.human_bytes(h.size_bytes), h.suggestion)
-        self.console.print(t)
+        for item in items:
+            top_table.add_row(
+                item.name,
+                item.type,
+                self.human_bytes(item.size),
+                self.relative_gradient_bar(item.size, largest),
+            )
+        self.console.print(top_table)
 
-    def print_path_report(self, path: str, *, one_filesystem: bool = False) -> None:
-        resolved = self._scanner.resolve_path(path)
-        if not os.path.exists(resolved):
-            self.console.print(f"[red]Not found:[/red] {path}")
-            sys.exit(1)
+    def print_bloat_hunter(self, path: str, *, one_filesystem: bool = False) -> int:
+        """
+        Mode B — scan *path* and show total size plus Top 5 via Bloat Hunter.
 
-        label = "File" if os.path.isfile(resolved) else "Directory"
+        Returns exit code 0 on success, 1 on failure.
+        """
+        try:
+            resolved = self._scanner.resolve_path(path)
+        except OSError as exc:
+            self.print_access_error(path, exc)
+            return 1
+
+        if not os.path.lexists(resolved):
+            self.console.print(f"[yellow]Not found[/yellow] — [cyan]{path}[/cyan]")
+            return 1
+
         mode_note = (
             "\n[dim]One filesystem only (-x): not crossing other mount points.[/dim]"
             if one_filesystem and os.path.isdir(resolved)
             else ""
         )
         self.console.print(
-            f"[bold]{label}[/bold] [cyan]{resolved}[/cyan]{mode_note}\n"
-            f"[dim]Measuring size…[/dim]"
+            f"[bold]Bloat Hunter[/bold] — [cyan]{resolved}[/cyan]{mode_note}\n"
+            f"[dim]Measuring…[/dim]"
         )
 
-        try:
-            nbytes = self._scanner.path_size_bytes(
-                resolved, one_filesystem=one_filesystem
-            )
-        except OSError as e:
-            self.console.print(f"[red]Could not read path:[/red] {e}")
-            sys.exit(1)
-
-        self.console.print(
-            f"\n[bold]This path uses[/bold]  [green]{self.human_bytes(nbytes)}[/green]\n"
-        )
-
-        tw = self.terminal_table_width()
         st_d: int | None = None
         if one_filesystem and os.path.isdir(resolved):
-            st_d = os.stat(resolved, follow_symlinks=False).st_dev
+            try:
+                st_d = os.stat(resolved, follow_symlinks=False).st_dev
+            except OSError as exc:
+                self.print_access_error(resolved, exc)
+                return 1
 
         if os.path.isdir(resolved):
-            top = self._scanner.top_five_direct_children(resolved, st_dev=st_d)
-            if top:
-                largest = top[0][1]
-                top_table = Table(
-                    title="Top 5 largest items here",
-                    header_style="bold magenta",
-                    width=tw,
-                    expand=True,
-                    caption="Bar length is relative to the largest entry in this list.",
-                )
-                top_table.add_column(
-                    "Name",
-                    style="cyan",
-                    overflow="ellipsis",
-                    no_wrap=True,
-                    max_width=max(18, tw // 4),
-                )
-                top_table.add_column("Size", justify="right", max_width=12)
-                top_table.add_column(
-                    "Share of largest",
-                    justify="left",
-                    overflow="ellipsis",
-                    max_width=max(30, tw // 2),
-                )
-                for name, sz in top:
-                    top_table.add_row(
-                        name,
-                        self.human_bytes(sz),
-                        self.relative_gradient_bar(sz, largest),
-                    )
-                self.console.print(top_table)
-                self.console.print()
+            try:
+                with os.scandir(resolved):
+                    pass
+            except OSError as exc:
+                self.print_access_error(resolved, exc)
+                return 1
 
-        vol = self._scanner.volume_usage(resolved)
-        if vol is None:
-            self.console.print("[dim]Could not read volume stats[/dim]")
-            return
+            try:
+                nbytes = self._scanner.path_size_bytes(
+                    resolved, one_filesystem=one_filesystem
+                )
+            except (OSError, PermissionError) as exc:
+                self.print_access_error(resolved, exc)
+                return 1
 
-        total, used, free, pct = vol
-        vol_table = Table(
-            title="Volume that contains this path",
-            header_style="bold magenta",
-            show_header=True,
-            width=tw,
-            expand=True,
+            try:
+                items = self._scanner.get_top_items(
+                    resolved, limit=5, st_dev=st_d
+                )
+            except (OSError, PermissionError) as exc:
+                self.print_access_error(resolved, exc)
+                return 1
+        else:
+            if os.path.islink(resolved) and not os.path.exists(resolved):
+                self.console.print(
+                    "[yellow]Broken symlink[/yellow] — cannot measure."
+                )
+                return 1
+            try:
+                nbytes = os.path.getsize(resolved)
+            except (OSError, PermissionError) as exc:
+                self.print_access_error(resolved, exc)
+                return 1
+            base = os.path.basename(resolved)
+            items = [TopItem(name=base, size=nbytes, type="file")]
+
+        self.console.print(
+            f"\n[bold]Total under path[/bold]  [green]{self.human_bytes(nbytes)}[/green]\n"
         )
-        vol_table.add_column("Total", justify="right", max_width=11)
-        vol_table.add_column("Used", justify="right", max_width=11)
-        vol_table.add_column("Free", justify="right", max_width=11)
-        vol_table.add_column(
-            "Usage",
-            justify="left",
-            overflow="ellipsis",
-            max_width=max(28, tw // 3),
-        )
-        vol_table.add_row(
-            self.human_bytes(total),
-            self.human_bytes(used),
-            self.human_bytes(free),
-            self.gradient_usage_bar(pct),
-        )
-        self.console.print(vol_table)
+        self.print_bloat_hunter_top_items(items)
+        return 0

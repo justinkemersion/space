@@ -4,22 +4,23 @@ A small **Python CLI** that answers two everyday questions in the terminal: **ho
 
 ## Intent
 
-`space` is meant to be **obvious and quick**: one command for an overview of mounted volumes, or pass a path to see how much space that path uses and how much room is left on the volume that holds it. It uses [psutil](https://github.com/giampaolo/psutil) for disk facts and keeps sizes in **human-readable binary units** (KiB, MiB, GiB, …).
+`space` is meant to be **obvious and quick**: **Mode A** shows all volumes; **Mode B** (“Bloat Hunter”) digs into one path. It uses [psutil](https://github.com/giampaolo/psutil) for disk facts and keeps sizes in **human-readable binary units** (KiB, MiB, GiB, …).
 
 ## Features
 
-- **No arguments** — Lists volumes (skipping common pseudo filesystems like `tmpfs` and `proc`), showing **mount point**, **total**, **used**, **free**, and a **usage bar** whose colors **gradient from green toward red** as the volume fills. Tables use the **terminal width** so layout stays tidy.
-- **Path argument** — Measures a **file** or **directory** (recursive sizing with **`os.scandir`**, no symlink following), prints total size, a **Top 5** table of the largest **immediate** children with **bars relative to the biggest** in that list, then the **volume** summary (same columns as above). Heavy or irrelevant trees (edit **`ignored_folders`** in `src/space/config.py`, e.g. `.git`, `node_modules`) are skipped so totals stay closer to “your project” than “dependencies + VCS”.
-- **`-x` / `--one-filesystem`** — Like **`du -x`**: only count files on the **same mount** as the path you pass. For **`/`** this skips **`/home`**, **`/efi`**, and other mounts so the run finishes in reasonable time. **Pseudo paths** under **`/proc`**, **`/sys`**, and **`/run`** are never walked (they are huge and not normal disk usage).
-- **Smart cleanup (Arch)** — On Arch Linux, if **pacman**’s package cache (`/var/cache/pacman/pkg`) or **yay**’s cache (`~/.cache/yay` or `$XDG_CACHE_HOME/yay`) is **≥ 2 GiB**, a short table suggests safe cleanup commands.
+- **Mode A (no arguments)** — Partition overview: **mount**, **total**, **used**, **free**, and a **green→red usage bar** per volume. Then **`ArchCleaner`** may print **maintenance tips** in a panel if pacman/yay caches exceed **2 GiB**.
+- **Mode B (`space <path>`)** — **Bloat Hunter**: total size under the path, then **`print_bloat_hunter_top_items`** — a **Top 5** table of the largest **immediate** children (**name**, **type** `file`/`directory`, **size**, **share bar**). Does **not** print the global partition table. Ignored trees come from **`ignored_folders`** in `src/space/config.py` (e.g. `.git`, `node_modules`).
+- **`-x` / `--one-filesystem`** — Bloat Hunter only, like **`du -x`**: stay on the **same device** as the path. Pseudo paths **`/proc`**, **`/sys`**, **`/run`** are never walked.
+- **Errors** — **Permission denied** and common I/O issues produce a short, styled message (exit code **1**); no traceback.
 - **`--help`** — Short usage via `argparse`.
 
 ## Layout
 
 - `src/space/config.py` — `ignored_folders`, `ignored_folder_patterns`, and other constants.
-- `src/space/scanner.py` — **`DiskScanner`**: sizes, partitions, Arch cache checks (data only).
-- `src/space/ui.py` — **`SpaceUI`**: Rich tables and bars.
-- `src/space/cli.py` — `argparse` and **`main`** (console script `space`).
+- `src/space/scanner.py` — **`DiskScanner`**: sizes, partitions, **`get_top_items`**, etc.
+- `src/space/cleaners.py` — **`ArchCleaner`**: Arch cache checks and recommendation text.
+- `src/space/ui.py` — **`SpaceUI`**: Rich tables, **`print_partition_table`**, **`print_bloat_hunter`**, **`print_bloat_hunter_top_items`**.
+- `src/space/cli.py` — **`main`**: Mode A vs Mode B (console script `space`).
 
 ## Requirements
 

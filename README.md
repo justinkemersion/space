@@ -8,8 +8,9 @@ A small **Python CLI** that answers two everyday questions in the terminal: **ho
 
 ## Features
 
-- **No arguments** — Lists volumes (skipping common pseudo filesystems like `tmpfs` and `proc`), showing **mount point**, **total**, **used**, **free**, and a **color-coded usage bar** with percentage.
-- **Path argument** — Measures a **file** or **directory** (directories are walked without following symlinks), prints total size used, then shows the same **total / used / free / bar** summary for the **filesystem that contains** that path.
+- **No arguments** — Lists volumes (skipping common pseudo filesystems like `tmpfs` and `proc`), showing **mount point**, **total**, **used**, **free**, and a **usage bar** whose colors **gradient from green toward red** as the volume fills. Tables use the **terminal width** so layout stays tidy.
+- **Path argument** — Measures a **file** or **directory** (recursive sizing with **`os.scandir`**, no symlink following), prints total size, a **Top 5** table of the largest **immediate** children with **bars relative to the biggest** in that list, then the **volume** summary (same columns as above).
+- **Smart cleanup (Arch)** — On Arch Linux, if **pacman**’s package cache (`/var/cache/pacman/pkg`) or **yay**’s cache (`~/.cache/yay` or `$XDG_CACHE_HOME/yay`) is **≥ 2 GiB**, a short table suggests safe cleanup commands.
 - **`--help`** — Short usage via `argparse`.
 
 ## Requirements

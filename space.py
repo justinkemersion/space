@@ -41,6 +41,23 @@ CACHE_WARN_BYTES = 2 * 1024**3  # 2 GiB
 PACMAN_PKG_CACHE = "/var/cache/pacman/pkg"
 
 
+def _kernel_vfs_path(path: str) -> bool:
+    """True if path is under Linux kernel pseudo filesystems (huge / non-disk)."""
+    if os.name != "posix":
+        return False
+    try:
+        p = os.path.realpath(path)
+    except OSError:
+        return True
+    for root in ("/proc", "/sys"):
+        if p == root or p.startswith(root + os.sep):
+            return True
+    # tmpfs; sizing under /run is slow and not “on disk” for the root volume.
+    if p == "/run" or p.startswith("/run" + os.sep):
+        return True
+    return False
+
+
 def terminal_table_width() -> int:
     """Use full terminal width with a sane default for non-TTY / narrow cases."""
     w = console.width
@@ -127,8 +144,15 @@ def relative_gradient_bar(size: int, largest: int, width: int | None = None) -> 
     return out
 
 
-def dir_size_scandir(path: str) -> int:
-    """Total bytes under a directory (no symlink following), using scandir."""
+def dir_size_scandir(path: str, *, st_dev: int | None = None) -> int:
+    """Total bytes under a directory (no symlink following), using scandir.
+
+    If *st_dev* is set (device id of the starting volume), do not cross into
+    other mount points — same idea as ``du -x``. Kernel pseudo paths under
+    /proc, /sys, and /run are never descended into.
+    """
+    if _kernel_vfs_path(path):
+        return 0
     total = 0
     stack = [path]
     while stack:
@@ -140,9 +164,19 @@ def dir_size_scandir(path: str) -> int:
                         if entry.is_symlink():
                             continue
                         if entry.is_file(follow_symlinks=False):
-                            total += entry.stat(follow_symlinks=False).st_size
+                            st = entry.stat(follow_symlinks=False)
+                            if st_dev is not None and st.st_dev != st_dev:
+                                continue
+                            total += st.st_size
                         elif entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
+                            child = entry.path
+                            if _kernel_vfs_path(child):
+                                continue
+                            if st_dev is not None:
+                                st = entry.stat(follow_symlinks=False)
+                                if st.st_dev != st_dev:
+                                    continue
+                            stack.append(child)
                     except OSError:
                         continue
         except OSError:
@@ -150,14 +184,19 @@ def dir_size_scandir(path: str) -> int:
     return total
 
 
-def path_size_bytes(path: str) -> int:
+def path_size_bytes(path: str, *, one_filesystem: bool = False) -> int:
     """Total bytes used by a file or everything under a directory."""
     if os.path.isfile(path) or (os.path.islink(path) and not os.path.isdir(path)):
         return os.path.getsize(path)
-    return dir_size_scandir(path)
+    st_d: int | None = None
+    if one_filesystem:
+        st_d = os.stat(path, follow_symlinks=False).st_dev
+    return dir_size_scandir(path, st_dev=st_d)
 
 
-def top_five_direct_children(dirpath: str) -> list[tuple[str, int]]:
+def top_five_direct_children(
+    dirpath: str, *, st_dev: int | None = None
+) -> list[tuple[str, int]]:
     """Largest immediate files/subdirectories by total size (dirs summed recursively)."""
     items: list[tuple[str, int]] = []
     try:
@@ -167,10 +206,19 @@ def top_five_direct_children(dirpath: str) -> list[tuple[str, int]]:
                     if entry.is_symlink():
                         continue
                     if entry.is_file(follow_symlinks=False):
-                        sz = entry.stat(follow_symlinks=False).st_size
-                        items.append((entry.name, sz))
+                        st = entry.stat(follow_symlinks=False)
+                        if st_dev is not None and st.st_dev != st_dev:
+                            continue
+                        items.append((entry.name, st.st_size))
                     elif entry.is_dir(follow_symlinks=False):
-                        sz = dir_size_scandir(entry.path)
+                        child = entry.path
+                        if _kernel_vfs_path(child):
+                            continue
+                        if st_dev is not None:
+                            st = entry.stat(follow_symlinks=False)
+                            if st.st_dev != st_dev:
+                                continue
+                        sz = dir_size_scandir(child, st_dev=st_dev)
                         items.append((entry.name + "/", sz))
                 except OSError:
                     continue
@@ -193,7 +241,7 @@ def safe_dir_size(path: str) -> int | None:
             pass
     except OSError:
         return None
-    return dir_size_scandir(path)
+    return dir_size_scandir(path, st_dev=None)
 
 
 def yay_cache_path() -> str:
@@ -319,20 +367,25 @@ def show_all_partitions() -> None:
     smart_cleanup_arch()
 
 
-def show_path_usage(path: str) -> None:
+def show_path_usage(path: str, *, one_filesystem: bool = False) -> None:
     resolved = os.path.realpath(path)
     if not os.path.exists(resolved):
         console.print(f"[red]Not found:[/red] {path}")
         sys.exit(1)
 
     label = "File" if os.path.isfile(resolved) else "Directory"
+    mode_note = (
+        "\n[dim]One filesystem only (-x): not crossing other mount points.[/dim]"
+        if one_filesystem and os.path.isdir(resolved)
+        else ""
+    )
     console.print(
-        f"[bold]{label}[/bold] [cyan]{resolved}[/cyan]\n"
+        f"[bold]{label}[/bold] [cyan]{resolved}[/cyan]{mode_note}\n"
         f"[dim]Measuring size…[/dim]"
     )
 
     try:
-        nbytes = path_size_bytes(resolved)
+        nbytes = path_size_bytes(resolved, one_filesystem=one_filesystem)
     except OSError as e:
         console.print(f"[red]Could not read path:[/red] {e}")
         sys.exit(1)
@@ -340,8 +393,11 @@ def show_path_usage(path: str) -> None:
     console.print(f"\n[bold]This path uses[/bold]  [green]{human_bytes(nbytes)}[/green]\n")
 
     tw = terminal_table_width()
+    st_d: int | None = None
+    if one_filesystem and os.path.isdir(resolved):
+        st_d = os.stat(resolved, follow_symlinks=False).st_dev
     if os.path.isdir(resolved):
-        top = top_five_direct_children(resolved)
+        top = top_five_direct_children(resolved, st_dev=st_d)
         if top:
             largest = top[0][1]
             top_table = Table(
@@ -416,6 +472,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="File or directory to measure (optional).",
     )
+    p.add_argument(
+        "-x",
+        "--one-filesystem",
+        action="store_true",
+        help="When sizing a directory, stay on the same device (like du -x). Use for '/' to skip other mounts and finish much faster.",
+    )
     return p
 
 
@@ -424,7 +486,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.path is None:
         show_all_partitions()
     else:
-        show_path_usage(args.path)
+        show_path_usage(args.path, one_filesystem=args.one_filesystem)
 
 
 if __name__ == "__main__":

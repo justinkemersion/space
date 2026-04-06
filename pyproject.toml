@@ -1,0 +1,19 @@
+[project]
+name = "space-cli"
+version = "0.1.0"
+description = "CLI: disk partitions or directory size, with Rich output"
+requires-python = ">=3.10"
+dependencies = [
+    "psutil>=5.9",
+    "rich>=13.0",
+]
+
+[project.scripts]
+space = "space:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["space"]
